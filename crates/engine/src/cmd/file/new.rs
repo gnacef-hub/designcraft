@@ -213,9 +213,20 @@ pub(super) fn file_new_cover(s: &mut Session, p: &Value) -> Result<Value> {
     let (trim_w, trim_h) = (size("trimWidth")?, size("trimHeight")?);
     let pages = p.get("pages").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
     let spine = spine_pt(printer, pages, p.get("spine").and_then(Value::as_f64)).map_err(|e| bad(ID, e))?;
+    // The safe margin and the bleed are lengths: finite, 0 or more, and the margins must leave a live area.
+    let length = |k: &str, default: f64| -> Result<f64> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(default),
+            Some(v) => v.as_f64().filter(|x| x.is_finite() && *x >= 0.0).ok_or_else(|| bad(ID, format!("`{k}` must be a length of 0 or more"))),
+        }
+    };
+    let (safe, bleed) = (length("safe", 36.0)?, length("bleed", 9.0)?);
+    if 2.0 * safe >= trim_w.min(trim_h) {
+        return Err(bad(ID, "`safe` is too large for the trim size"));
+    }
     let settings = json!({
         "width": 2.0 * trim_w + spine, "height": trim_h, "pages": 1, "facingPages": false, "columns": 1, "primaryTextFrame": false,
-        "margins": f64_or(p, "safe", 36.0), "bleed": f64_or(p, "bleed", 9.0),
+        "margins": safe, "bleed": bleed,
     });
     let mut nd = new_document_settings(s, &settings)?;
     s.untitled += 1;
@@ -290,6 +301,22 @@ mod new_document_tests {
             assert!(s.execute("file.newCover", &bad).is_err(), "{bad}");
             assert_eq!(s.documents().len(), before, "a refused call opens nothing");
         }
+    }
+
+    #[test]
+    fn new_cover_refuses_bad_margins_and_bleed_and_opens_nothing() {
+        let mut s = Session::new();
+        let base = json!({"printer": "other", "spine": 30, "trimWidth": 400, "trimHeight": 600});
+        for (k, v) in [("safe", json!(-5)), ("bleed", json!(-1)), ("safe", json!("wide")), ("bleed", json!(true)), ("safe", json!(300))] {
+            let mut p = base.clone();
+            p[k] = v.clone();
+            assert!(s.execute("file.newCover", &p).is_err(), "{k} = {v}");
+        }
+        assert_eq!(s.documents().len(), 0, "a refused call opens nothing");
+        let mut ok = base.clone();
+        ok["safe"] = json!(0);
+        ok["bleed"] = json!(0);
+        assert!(s.execute("file.newCover", &ok).is_ok(), "zero is allowed");
     }
 
     #[test]
