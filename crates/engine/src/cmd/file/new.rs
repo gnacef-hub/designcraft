@@ -212,12 +212,21 @@ pub(super) fn file_new_cover(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let (trim_w, trim_h) = (size("trimWidth")?, size("trimHeight")?);
     let pages = p.get("pages").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
-    let spine = spine_pt(printer, pages, p.get("spine").and_then(Value::as_f64)).map_err(|e| bad(ID, e))?;
-    // The safe margin and the bleed are lengths: finite, 0 or more, and the margins must leave a live area.
+    // A typed spine that is not a number is refused, not swapped for the printer's own rule.
+    let typed_spine = match p.get("spine") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_f64().ok_or_else(|| bad(ID, "`spine` must be a number of points"))?),
+    };
+    let spine = spine_pt(printer, pages, typed_spine).map_err(|e| bad(ID, e))?;
+    // The safe margin and the bleed are lengths: finite, 0 to 1296 pt (the most a document edge takes),
+    // and the margins must leave a live area.
     let length = |k: &str, default: f64| -> Result<f64> {
         match p.get(k) {
             None | Some(Value::Null) => Ok(default),
-            Some(v) => v.as_f64().filter(|x| x.is_finite() && *x >= 0.0).ok_or_else(|| bad(ID, format!("`{k}` must be a length of 0 or more"))),
+            Some(v) => v
+                .as_f64()
+                .filter(|x| x.is_finite() && (0.0..=1296.0).contains(x))
+                .ok_or_else(|| bad(ID, format!("`{k}` must be a length of 0 to 1296 pt"))),
         }
     };
     let (safe, bleed) = (length("safe", 36.0)?, length("bleed", 9.0)?);
@@ -313,6 +322,15 @@ mod new_document_tests {
             assert!(s.execute("file.newCover", &p).is_err(), "{k} = {v}");
         }
         assert_eq!(s.documents().len(), 0, "a refused call opens nothing");
+        for (k, v) in [("bleed", json!(1296.5)), ("spine", json!("40")), ("spine", json!(true))] {
+            let mut p = base.clone();
+            p[k] = v.clone();
+            assert!(s.execute("file.newCover", &p).is_err(), "{k} = {v}");
+        }
+        let mut lulu = json!({"printer": "lulu", "pages": 224, "trimWidth": 400, "trimHeight": 600, "spine": "40"});
+        assert!(s.execute("file.newCover", &lulu).is_err(), "a typed spine that is not a number is not replaced by Lulu's rule");
+        lulu["spine"] = serde_json::Value::Null;
+        assert!(s.execute("file.newCover", &lulu).is_ok(), "a null spine means: use the printer's rule");
         let mut ok = base.clone();
         ok["safe"] = json!(0);
         ok["bleed"] = json!(0);

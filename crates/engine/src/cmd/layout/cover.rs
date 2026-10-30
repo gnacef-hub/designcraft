@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use designcraft_doc::{Content, Fitting, Item};
+use designcraft_doc::{Content, Item};
 use designcraft_geom::{Affine, Rect};
 
 use super::margins::set_page_width;
@@ -56,10 +56,18 @@ fn axis_aligned(m: Affine) -> bool {
     b.abs() < 1e-9 && c.abs() < 1e-9 && a > 1e-9 && d > 1e-9
 }
 
+/// A transform that scales, moves, mirrors or turns by quarter turns: its picture still fills a
+/// box, so the bounding box tells where it lies.
+fn quarter_turned(m: Affine) -> bool {
+    let [a, b, c, d, _, _] = m.as_coeffs();
+    let (flat, turned) = (b.abs() < 1e-9 && c.abs() < 1e-9, a.abs() < 1e-9 && d.abs() < 1e-9);
+    (flat && a.abs() > 1e-9 && d.abs() > 1e-9) || (turned && b.abs() > 1e-9 && c.abs() > 1e-9)
+}
+
 /// Does the picture in this frame cover all of it (so it was placed to fill the frame)?
 fn picture_fills_frame(it: &Item) -> bool {
     let Content::Graphic(g) = &it.content else { return false };
-    if !axis_aligned(g.xf) {
+    if !quarter_turned(g.xf) {
         return false;
     }
     let (pic, frame) = (g.xf.transform_rect_bbox(Rect::new(0.0, 0.0, g.size.0, g.size.1)), it.inner_bounds());
@@ -77,11 +85,27 @@ fn stretch(it: &mut Item, b: Rect, to: Rect) {
     if fills {
         let frame = it.inner_bounds();
         if let Content::Graphic(g) = &mut it.content
-            && let Some(xf) = g.fitted(frame, Fitting::FillProportionally)
+            && let Some(xf) = refilled(g, frame)
         {
             g.xf = xf;
         }
     }
+}
+
+/// The graphic's transform scaled evenly until its box fills `frame`, with its mirror or turn kept.
+/// It is placed by the same crop and alignment as `Graphic::fitted`, which cannot be used here:
+/// it builds an upright transform and would drop the mirror or turn.
+fn refilled(g: &designcraft_doc::Graphic, frame: Rect) -> Option<Affine> {
+    let cur = g.xf.transform_rect_bbox(Rect::new(0.0, 0.0, g.size.0, g.size.1));
+    let [t, l, b, r] = g.crop;
+    let area = Rect::new(frame.x0 - l, frame.y0 - t, frame.x1 + r, frame.y1 + b);
+    if cur.width() <= 0.0 || cur.height() <= 0.0 || area.width() <= 0.0 || area.height() <= 0.0 {
+        return None;
+    }
+    let k = (area.width() / cur.width()).max(area.height() / cur.height());
+    let (fx, fy) = ([0.0, 0.5, 1.0][(g.fit_align % 3) as usize], [0.0, 0.5, 1.0][(g.fit_align / 3).min(2) as usize]);
+    let (x, y) = (area.x0 + (area.width() - cur.width() * k) * fx, area.y0 + (area.height() - cur.height() * k) * fy);
+    Some(Affine::translate((x, y)) * Affine::scale(k) * Affine::translate((-cur.x0, -cur.y0)) * g.xf)
 }
 
 /// The spine rule applied to each object inside a group, not to the group as one box: a group that
@@ -476,6 +500,10 @@ mod tests {
     }
 
     fn set_graphic(s: &mut Session, id: u64, size: (f64, f64)) {
+        set_graphic_xf(s, id, size, designcraft_geom::Affine::IDENTITY);
+    }
+
+    fn set_graphic_xf(s: &mut Session, id: u64, size: (f64, f64), xf: designcraft_geom::Affine) {
         s.edit(|d, _| {
             for it in &mut std::sync::Arc::make_mut(&mut d.spreads[0]).items {
                 if it.id == designcraft_doc::ItemId(id) {
@@ -483,7 +511,7 @@ mod tests {
                         layer_options: None,
                         asset: designcraft_doc::AssetId(1),
                         size,
-                        xf: designcraft_geom::Affine::IDENTITY,
+                        xf,
                         clip: None,
                         auto_fit: designcraft_doc::Fitting::None,
                         fit_align: 4,
@@ -514,6 +542,30 @@ mod tests {
         assert!((frame.width() - 410.0).abs() < 1e-6, "{frame:?}");
         let covers = pic.x0 <= frame.x0 + 1e-6 && pic.x1 >= frame.x1 - 1e-6 && pic.y0 <= frame.y0 + 1e-6 && pic.y1 >= frame.y1 - 1e-6;
         assert!(covers, "the picture {pic:?} leaves bare frame {frame:?}");
+    }
+
+    #[test]
+    fn a_flipped_or_turned_picture_that_filled_a_stretched_frame_still_fills_it_and_keeps_its_turn() {
+        use designcraft_geom::Affine;
+        let flips: [(&str, Affine); 3] = [
+            ("mirrored left to right", Affine::new([-1.0, 0.0, 0.0, 1.0, 400.0, 0.0])),
+            ("upside down", Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, 400.0])),
+            ("turned a quarter", Affine::new([0.0, 1.0, -1.0, 0.0, 400.0, 0.0])),
+        ];
+        for (what, xf) in flips {
+            let (mut s, [.., bg]) = cover();
+            set_graphic_xf(&mut s, bg, (400.0, 400.0), xf);
+            s.execute("layout.coverResize", &json!({"page": 1, "oldSpine": 40, "newSpine": 50})).unwrap();
+            let (pic, frame) = picture_box(&s, bg);
+            let covers = pic.x0 <= frame.x0 + 1e-6 && pic.x1 >= frame.x1 - 1e-6 && pic.y0 <= frame.y0 + 1e-6 && pic.y1 >= frame.y1 - 1e-6;
+            assert!(covers, "{what}: the picture {pic:?} leaves bare frame {frame:?}");
+            let it = s.doc().unwrap().doc.item(designcraft_doc::ItemId(bg)).unwrap();
+            let designcraft_doc::Content::Graphic(g) = &it.content else { panic!("not a picture") };
+            let [a, b, c, d, ..] = g.xf.as_coeffs();
+            let [oa, ob, oc, od, ..] = xf.as_coeffs();
+            let same_turn = |n: f64, o: f64| n.signum() == o.signum() || (n.abs() < 1e-9 && o.abs() < 1e-9);
+            assert!(same_turn(a, oa) && same_turn(b, ob) && same_turn(c, oc) && same_turn(d, od), "{what}: the flip or turn was lost: {:?}", g.xf);
+        }
     }
 
     #[test]
