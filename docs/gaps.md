@@ -116,6 +116,7 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 - **Estimate:** 10–20 h. **Doc:** [localization-parity.md](localization-parity.md)
 
 ### 9. PDF output presets and standards (FF)
+- **Cover size and spine:** done for one-page flat covers: File › New Book Cover… makes a blank cover (Lulu paperback, Lulu hardback, or any printer with a typed spine such as Blurb) and File › Resize Book Cover… re-sizes one when the page count changes. Lulu's paperback rule and hardback table are built in. Groups across the spine are placed object by object, and a picture that filled its frame is scaled to fill it again. Still missing: dust jackets, image wrap, Lulu's hardback wrap and bleed values (type them), and spine tables for other printers.
 - **Missing:** PDF/X-3, Adobe PDF Presets and `.joboptions` load/save, output-intent choice
   beyond the built-in profile, PDF/UA validation; soft effects other than the drop shadow reach
   the PDF/X-1a flattener as RGB images; #159, #32.

@@ -197,6 +197,46 @@ fn edges(p: &Value, key: &str) -> Option<[f64; 4]> {
     }
 }
 
+/// File › New Book Cover: a blank one-page flat cover (back, spine, front, left to right) sized for
+/// a printer, with the bleed and safe margins set and guides on the two edges of the spine.
+/// The spine comes from the printer's rule for `pages`, or is typed (`spine`, in points).
+pub(super) fn file_new_cover(s: &mut Session, p: &Value) -> Result<Value> {
+    use crate::cover::{Printer, spine_pt};
+    const ID: &str = "file.newCover";
+    let printer = str_param(p, "printer").and_then(Printer::parse).ok_or_else(|| bad(ID, "`printer`: lulu, hardback or other"))?;
+    let size = |k: &str| {
+        p.get(k)
+            .and_then(Value::as_f64)
+            .filter(|v| v.is_finite() && (18.0..=4000.0).contains(v))
+            .ok_or_else(|| bad(ID, format!("`{k}` required: 18 to 4000 pt")))
+    };
+    let (trim_w, trim_h) = (size("trimWidth")?, size("trimHeight")?);
+    let pages = p.get("pages").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+    let spine = spine_pt(printer, pages, p.get("spine").and_then(Value::as_f64)).map_err(|e| bad(ID, e))?;
+    let settings = json!({
+        "width": 2.0 * trim_w + spine, "height": trim_h, "pages": 1, "facingPages": false, "columns": 1, "primaryTextFrame": false,
+        "margins": f64_or(p, "safe", 36.0), "bleed": f64_or(p, "bleed", 9.0),
+    });
+    let mut nd = new_document_settings(s, &settings)?;
+    s.untitled += 1;
+    nd.title = str_param(p, "title").map(str::to_string).unwrap_or_else(|| format!("Untitled-{}", s.untitled));
+    let mut d = new_document(&nd);
+    if let Some(page) = d.spreads.get_mut(0).and_then(|sp| Arc::make_mut(sp).pages.get_mut(0)) {
+        for x in [trim_w, trim_w + spine].into_iter().take(if spine > 0.0 { 2 } else { 1 }) {
+            page.guides.push(designcraft_doc::Guide {
+                orientation: designcraft_doc::Orientation::Vertical,
+                position: x,
+                spread: false,
+                locked: false,
+                layer: None,
+                liquid: false,
+            });
+        }
+    }
+    let i = s.add_document(DocState::new(d, None));
+    Ok(json!({"index": i, "width": 2.0 * trim_w + spine, "height": trim_h, "spine": spine}))
+}
+
 pub(super) fn file_sample(s: &mut Session, _p: &Value) -> Result<Value> {
     let d = crate::sample::magazine();
     let i = s.add_document(DocState::new(d, None));
@@ -208,6 +248,49 @@ mod new_document_tests {
     use serde_json::json;
 
     use crate::Session;
+
+    #[test]
+    fn new_cover_makes_a_flat_one_page_cover_with_guides_on_the_spine() {
+        let mut s = Session::new();
+        let r = s.execute("file.newCover", &json!({"printer": "lulu", "pages": 224, "trimWidth": 612, "trimHeight": 792})).unwrap();
+        let spine = 40.644;
+        assert!((r["spine"].as_f64().unwrap() - spine).abs() < 1e-9);
+        let st = s.doc().unwrap();
+        assert!(!st.is_dirty() && st.history.undo.is_empty(), "a new cover is a clean document");
+        let d = &st.doc;
+        assert_eq!(d.page_count(), 1);
+        let pg = d.page(0).unwrap();
+        assert!((pg.width - (1224.0 + spine)).abs() < 1e-9 && pg.height == 792.0, "{}x{}", pg.width, pg.height);
+        assert_eq!(d.settings.bleed, [9.0; 4]);
+        assert_eq!((pg.margins.top, pg.margins.bottom), (36.0, 36.0));
+        let at: Vec<f64> = pg.guides.iter().map(|g| g.position).collect();
+        assert!(at.len() == 2 && (at[0] - 612.0).abs() < 1e-9 && (at[1] - (612.0 + spine)).abs() < 1e-9, "{at:?}");
+    }
+
+    #[test]
+    fn new_cover_takes_a_hardback_a_typed_spine_a_bleed_and_refuses_nonsense() {
+        let mut s = Session::new();
+        let hb = s
+            .execute("file.newCover", &json!({"printer": "hardback", "pages": 224, "trimWidth": 432, "trimHeight": 648, "bleed": 54, "safe": 18}))
+            .unwrap();
+        assert_eq!(hb["spine"].as_f64(), Some(58.5));
+        assert_eq!(s.doc().unwrap().doc.settings.bleed, [54.0; 4]);
+        let typed = s.execute("file.newCover", &json!({"printer": "other", "spine": 30, "trimWidth": 400, "trimHeight": 600})).unwrap();
+        assert_eq!(typed["width"].as_f64(), Some(830.0));
+        let none = s.execute("file.newCover", &json!({"printer": "other", "spine": 0, "trimWidth": 400, "trimHeight": 600})).unwrap();
+        assert_eq!(s.doc().unwrap().doc.page(0).unwrap().guides.len(), 1, "no spine, one centre guide: {none}");
+        for bad in [
+            json!({"printer": "kdp", "pages": 100, "trimWidth": 400, "trimHeight": 600}),
+            json!({"printer": "other", "trimWidth": 400, "trimHeight": 600}),
+            json!({"printer": "lulu", "pages": 100, "trimWidth": 5, "trimHeight": 600}),
+            json!({"printer": "lulu", "pages": 100, "trimWidth": 400}),
+            json!({"printer": "lulu", "pages": 0, "trimWidth": 400, "trimHeight": 600}),
+        ] {
+            let before = s.documents().len();
+            assert!(s.execute("file.newCover", &bad).is_err(), "{bad}");
+            assert_eq!(s.documents().len(), before, "a refused call opens nothing");
+        }
+    }
 
     #[test]
     fn saved_presets_make_documents_by_name() {
