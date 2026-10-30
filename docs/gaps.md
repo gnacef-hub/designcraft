@@ -116,7 +116,7 @@ Kind: **F** feature · **U** UI/UX · **T** typography · **FF** file format · 
 - **Estimate:** 10–20 h. **Doc:** [localization-parity.md](localization-parity.md)
 
 ### 9. PDF output presets and standards (FF)
-- **Missing:** PDF/X-3, Adobe PDF Presets and `.joboptions` load/save, output-intent choice
+- **Missing:** PDF/X-3, Adobe PDF Presets and `.joboptions` save (load is done: Export PDF › Preset › Import preset…), output-intent choice
   beyond the built-in profile, PDF/UA validation; soft effects other than the drop shadow reach
   the PDF/X-1a flattener as RGB images; #159, #32.
 - **Have:** PDF/X-4 with output intent and a validator (`#200`), PDF/X-1a:2003 through
